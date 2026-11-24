@@ -63,6 +63,13 @@ def normalize(value, cur, after, sentence, full, cat, params):
     um = re.match(r"\s*(?:\([^)]*\)\s*)?(?:(?:incl|excl|plus|\+|inclusive|exclusive)[^,;]*?\s+)?"
                   r"(?:per|a|/|each|for each|for every|for one|for a|for each|for 1)\s+(?:single\s+)?([a-z]+)", a)
     word = um.group(1) if um else ""
+    # price for a batch: "₹X per 100 meals" -> X / 100 per meal
+    bm = re.match(r"\s*(?:per|for(?: every)?|/)\s+(\d[\d,]*)\s+([a-z]+)", a)
+    if bm and _int(bm.group(1)) > 0:
+        n = _int(bm.group(1))
+        v /= n
+        word = bm.group(2)
+        notes.append(f"/{n} batch")
     if word == "dozen":
         v /= 12
         notes.append("/12 dozen")

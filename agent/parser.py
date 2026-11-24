@@ -190,36 +190,60 @@ def _pct_value(s):
 PCT = r"(?:\d+(?:\.\d+)?\s*(?:%|per ?cent)|[a-z\- ]+?\s+per ?cent|half|one[- ]third|a third|two[- ]thirds|a quarter|one quarter|three quarters|full|entire|whole|100%)"
 
 
+FRACTION_WORDS = [(r"\b(?:the\s+)?(?:full|entire|whole|complete)\b|\b100\s*%|\ball of the\b", 100),
+                  (r"\bthree[\s-]+quarters?\b", 75), (r"\btwo[\s-]+thirds?\b", 66.7),
+                  (r"\bhalf\b", 50), (r"\b(?:one|a)[\s-]+third\b", 33.4),
+                  (r"\b(?:one|a)[\s-]+quarter\b", 25)]
+WORD_PCT = re.compile(r"\b([a-z]+(?:[\s-][a-z]+)*)\s+per\s?cent\b")
+
+
+def _sentences(text):
+    return [s for s in re.split(r"\n+|(?<=[.!?])\s+(?=[A-Z(\[<])", text) if s.strip()]
+
+
+def _advance_pct(s):
+    """Largest advance/upfront share stated in sentence s (None if not an advance sentence)."""
+    if not re.search(r"up[\s-]*front|in advance|\badvance\b|\bprepay|\bpre-?payment", s):
+        return None
+    vals = [float(m.group(1)) for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(?:%|per\s?cent)", s)]
+    for m in WORD_PCT.finditer(s):
+        words = m.group(1).split()
+        for i in range(len(words)):
+            v = words_to_number(" ".join(words[i:]))
+            if v is not None:
+                vals.append(float(v))
+                break
+    for pat, v in FRACTION_WORDS:
+        if re.search(pat, s):
+            vals.append(v)
+    return max(vals) if vals else None
+
+
+NEG = r"(?:\bno\b|\bnot\b|\bnever\b|\bwithout\b|\bnon[\s-]|n't\b|\bneither\b|\bnor\b)"
+
+
 def detect_banned(text):
-    t = text.lower()
-    # automatic renewal
-    neg_ren = re.search(r"(?:no|not|never|without|won't|will not|does not|doesn't)\s+(?:\w+\s+){0,3}(?:auto(?:matic(?:ally)?)?[\s-]*renew)", t)
-    ren = re.search(r"auto[\s-]*renew|automatic(?:ally)? renew|renews? automatically|renews? on its own|"
-                    r"(?:year|month)[\s-]+(?:to|on|after)[\s-]+(?:year|month)\s+unless|"
-                    r"continues?\s+(?:\w+\s+){0,6}unless\s+(?:\w+\s+){0,4}(?:cancel|terminat|notice)|"
-                    r"rolls? over|evergreen|renewed automatically|automatically extend|auto[\s-]*extend",
-                    t)
-    if ren and not neg_ren:
-        return "auto-renewal: " + ren.group(0)
-    # upfront / advance payment above 30%
-    for m in re.finditer(rf"(?P<pct>{PCT})\s*(?:of the (?:order|total|contract)(?: value)?\s*)?(?:payment\s*)?(?:paid\s*|payable\s*|due\s*|to be paid\s*)?(?:up[\s-]*front|in advance|as (?:an )?advance|advance)", t):
-        v = _pct_value(m.group("pct"))
+    """Banned contract terms (policies/banned-terms.md), judged sentence by sentence."""
+    for s in _sentences(text.lower()):
+        # automatic renewal
+        ren = re.search(r"auto[\s-]*renew|automatic(?:ally)? renew|renews? automatically|renews? (?:itself|on its own|by itself)|"
+                        r"(?:year|month)[\s-]+(?:to|on|after)[\s-]+(?:year|month)\s+unless|"
+                        r"continues?\s+(?:\w+\s+){0,6}unless\s+(?:\w+\s+){0,4}(?:cancel|terminat|notice|opt)|"
+                        r"rolls? over|evergreen|renewed automatically|automatically (?:extend|continue)|auto[\s-]*extend", s)
+        if ren and not re.search(NEG + r"\s*(?:\w+\s+){0,3}(?:auto(?:matic(?:ally)?)?[\s-]*renew|renew)", s):
+            return "auto-renewal: " + ren.group(0)
+        # advance / upfront payment above 30%
+        v = _advance_pct(s)
         if v is not None and v > 30:
-            return "advance: " + m.group(0)
-    for m in re.finditer(rf"(?:up[\s-]*front|advance)(?: payment)?(?: of)?\s*(?P<pct>{PCT})", t):
-        v = _pct_value(m.group("pct"))
-        if v is not None and v > 30:
-            return "advance: " + m.group(0)
-    if re.search(r"(?:full|entire|whole|100%) (?:payment|amount|value)\s*(?:\w+\s+){0,3}(?:up[\s-]*front|in advance)", t):
-        return "advance: full"
-    # unlimited liability
-    if re.search(r"unlimited liability|liability (?:is |shall be |will be )?(?:unlimited|uncapped)|uncapped liability|"
-                 r"no (?:cap|limit) on (?:acme'?s? |your )?liability", t) and not re.search(
-                 r"(?:no|not|never|without)\s+(?:\w+\s+){0,3}unlimited liability", t):
-        return "unlimited liability"
-    # exclusivity
-    excl = re.search(r"exclusiv|sole supplier|only from us|exclusively|solely from us|single[- ]source", t)
-    neg_excl = re.search(r"(?:no|not|never|without|non)[\s-]+(?:\w+\s+){0,4}exclusiv|non-exclusive|exclusivity is not", t)
-    if excl and not neg_excl:
-        return "exclusivity: " + excl.group(0)
+            return f"advance {v:g}%: " + s.strip()[:60]
+        # unlimited liability for Acme
+        if re.search(r"liabilit", s) and re.search(r"unlimited|uncapped|\bno (?:cap|limit|ceiling)|without (?:any )?(?:cap|limit|ceiling)|"
+                                                   r"not (?:be )?(?:capped|limited)", s) \
+                and not re.search(NEG + r"\s*(?:\w+\s+){0,4}(?:unlimited|uncapped)", s):
+            return "unlimited liability: " + s.strip()[:60]
+        # exclusivity
+        excl = re.search(r"exclusiv|sole (?:supplier|vendor|source)|only from us|solely from us|single[- ]source|"
+                         r"(?:not|never) (?:buy|purchase|source) from any(?:one| other)|no other (?:supplier|vendor)", s)
+        if excl and not re.search(NEG + r"\s*(?:\w+\s+){0,4}exclusiv|non-?exclusive", s):
+            return "exclusivity: " + excl.group(0)
     return None
